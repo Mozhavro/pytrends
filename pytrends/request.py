@@ -4,7 +4,7 @@ import json
 import sys
 
 import pandas as pd
-import requests
+import aiohttp
 
 from pytrends import exceptions
 
@@ -51,7 +51,7 @@ class TrendReq(object):
         self.related_topics_widget_list = list()
         self.related_queries_widget_list = list()
 
-    def _get_data(self, url, method=GET_METHOD, trim_chars=0, **kwargs):
+    async def _get_data(self, url, method=GET_METHOD, trim_chars=0, **kwargs):
         """Send a request to Google and return the JSON response as a Python object
 
         :param url: the url to which the request will be sent
@@ -61,33 +61,34 @@ class TrendReq(object):
         :param kwargs: any extra key arguments passed to the request builder (usually query parameters or data)
         :return:
         """
-        if method == TrendReq.POST_METHOD:
-            response = requests.post(url, **kwargs)
-        else:
-            response = requests.get(url, **kwargs)
-
-        # check if the response contains json and throw an exception otherwise
-        # Google mostly sends 'application/json' in the Content-Type header,
-        # but occasionally it sends 'application/javascript
-        # and sometimes even 'text/javascript
-        if 'application/json' in response.headers['Content-Type'] or \
-            'application/javascript' in response.headers['Content-Type'] or \
+        async with aiohttp.ClientSession() as session:
+            if method == TrendReq.POST_METHOD:
+                response = await session.post(url, **kwargs)
+            else:
+                response = await session.get(url, **kwargs)
+            # check if the response contains json and throw an exception otherwise
+            # Google mostly sends 'application/json' in the Content-Type header,
+            # but occasionally it sends 'application/javascript
+            # and sometimes even 'text/javascript
+            if 'application/json' in response.headers['Content-Type'] or \
+                'application/javascript' in response.headers['Content-Type'] or \
                 'text/javascript' in response.headers['Content-Type']:
 
-            # trim initial characters
-            # some responses start with garbage characters, like ")]}',"
-            # these have to be cleaned before being passed to the json parser
-            content = response.text[trim_chars:]
+                # trim initial characters
+                # some responses start with garbage characters, like ")]}',"
+                # these have to be cleaned before being passed to the json parser
+                content = await response.text()
+                content = content[trim_chars:]
 
-            # parse json
-            return json.loads(content)
-        else:
-            # this is often the case when the amount of keywords in the payload for the IP
-            # is not allowed by Google
-            raise exceptions.ResponseError('The request failed: Google returned a '
-                                           'response with code {0}.'.format(response.status_code), response=response)
+                # parse json
+                return json.loads(content)
+            else:
+                # this is often the case when the amount of keywords in the payload for the IP
+                # is not allowed by Google
+                raise exceptions.ResponseError('The request failed: Google returned a '
+                                               'response with code {0}.'.format(response.status_code), response=response)
 
-    def build_payload(self, kw_list, cat=0, timeframe='today 5-y', geo='', gprop=''):
+    async def build_payload(self, kw_list, cat=0, timeframe='today 5-y', geo='', gprop=''):
         """Create the payload for related queries, interest over time and interest by region"""
         self.kw_list = kw_list
         self.geo = geo
@@ -105,19 +106,20 @@ class TrendReq(object):
         # requests will mangle this if it is not a string
         self.token_payload['req'] = json.dumps(self.token_payload['req'])
         # get tokens
-        self._tokens()
+        await self._tokens()
         return
 
-    def _tokens(self):
+    async def _tokens(self):
         """Makes request to Google to get API tokens for interest over time, interest by region and related queries"""
 
         # make the request and parse the returned json
-        widget_dict = self._get_data(
+        data = await self._get_data(
             url=TrendReq.GENERAL_URL,
             method=TrendReq.GET_METHOD,
             params=self.token_payload,
             trim_chars=4,
-        )['widgets']
+        )
+        widget_dict = data["widgets"]
 
         # order of the json matters...
         first_region_token = True
@@ -139,7 +141,7 @@ class TrendReq(object):
                 self.related_queries_widget_list.append(widget)
         return
 
-    def interest_over_time(self):
+    async def interest_over_time(self):
         """Request data from Google's Interest Over Time section and return a dataframe"""
 
         over_time_payload = {
@@ -150,7 +152,7 @@ class TrendReq(object):
         }
 
         # make the request and parse the returned json
-        req_json = self._get_data(
+        req_json = await self._get_data(
             url=TrendReq.INTEREST_OVER_TIME_URL,
             method=TrendReq.GET_METHOD,
             trim_chars=5,
@@ -184,7 +186,7 @@ class TrendReq(object):
 
         return final
 
-    def interest_by_region(self, resolution='COUNTRY'):
+    async def interest_by_region(self, resolution='COUNTRY'):
         """Request data from Google's Interest by Region section and return a dataframe"""
 
         # make the request
@@ -197,7 +199,7 @@ class TrendReq(object):
         region_payload['tz'] = self.tz
 
         # parse returned json
-        req_json = self._get_data(
+        req_json = await self._get_data(
             url=TrendReq.INTEREST_BY_REGION_URL,
             method=TrendReq.GET_METHOD,
             trim_chars=5,
@@ -214,7 +216,7 @@ class TrendReq(object):
             del result_df[idx]
         return result_df
 
-    def related_topics(self):
+    async def related_topics(self):
         """Request data from Google's Related Topics section and return a dictionary of dataframes
 
         If no top and/or rising related topics are found, the value for the key "top" and/or "rising" will be None
@@ -232,7 +234,7 @@ class TrendReq(object):
             related_payload['tz'] = self.tz
 
             # parse the returned json
-            req_json = self._get_data(
+            req_json = await self._get_data(
                 url=TrendReq.RELATED_QUERIES_URL,
                 method=TrendReq.GET_METHOD,
                 trim_chars=5,
@@ -250,7 +252,7 @@ class TrendReq(object):
             result_dict[kw] = df
         return result_dict
 
-    def related_queries(self):
+    async def related_queries(self):
         """Request data from Google's Related Queries section and return a dictionary of dataframes
 
         If no top and/or rising related queries are found, the value for the key "top" and/or "rising" will be None
@@ -268,7 +270,7 @@ class TrendReq(object):
             related_payload['tz'] = self.tz
 
             # parse the returned json
-            req_json = self._get_data(
+            req_json = await self._get_data(
                 url=TrendReq.RELATED_QUERIES_URL,
                 method=TrendReq.GET_METHOD,
                 trim_chars=5,
@@ -294,12 +296,12 @@ class TrendReq(object):
             result_dict[kw] = {'top': top_df, 'rising': rising_df}
         return result_dict
 
-    def trending_searches(self, pn='p1'):
+    async def trending_searches(self, pn='p1'):
         """Request data from Google's Trending Searches section and return a dataframe"""
 
         # make the request
         forms = {'ajax': 1, 'pn': pn, 'htd': '', 'htv': 'l'}
-        req_json = self._get_data(
+        req_json = await self._get_data(
             url=TrendReq.TRENDING_SEARCHES_URL,
             method=TrendReq.POST_METHOD,
             data=forms,
@@ -315,14 +317,14 @@ class TrendReq(object):
         result_df = pd.concat([result_df, sub_df])
         return result_df
 
-    def top_charts(self, date, cid, geo='US', cat=''):
+    async def top_charts(self, date, cid, geo='US', cat=''):
         """Request data from Google's Top Charts section and return a dataframe"""
 
         # create the payload
         chart_payload = {'ajax': 1, 'lp': 1, 'geo': geo, 'date': date, 'cat': cat, 'cid': cid}
 
         # make the request and parse the returned json
-        req_json = self._get_data(
+        req_json = await self._get_data(
             url=TrendReq.TOP_CHARTS_URL,
             method=TrendReq.POST_METHOD,
             params=chart_payload,
@@ -330,14 +332,14 @@ class TrendReq(object):
         df = pd.DataFrame(req_json)
         return df
 
-    def suggestions(self, keyword):
+    async def suggestions(self, keyword):
         """Request data from Google's Keyword Suggestion dropdown and return a dictionary"""
 
         # make the request
         kw_param = quote(keyword)
         parameters = {'hl': self.hl}
 
-        req_json = self._get_data(
+        req_json = await self._get_data(
             url=TrendReq.SUGGESTIONS_URL + kw_param,
             params=parameters,
             method=TrendReq.GET_METHOD,
